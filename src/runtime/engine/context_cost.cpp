@@ -356,8 +356,8 @@ void write_document_atomic(const std::filesystem::path& path, const Json& docume
 
 } // namespace
 
-std::uint64_t ContextMachineCostModel::transfer_ns(ContextTransferDirection direction,
-                                                   TransferWork work) const noexcept {
+std::uint64_t ContextCostModel::transfer_ns(ContextTransferDirection direction,
+                                            TransferWork work) const noexcept {
     if (work.payload_bytes == 0 && work.copy_operations == 0) { return 0; }
     const std::size_t index = direction_index(direction);
     if (index >= transfer.size()) { return std::numeric_limits<std::uint64_t>::max(); }
@@ -369,36 +369,7 @@ std::uint64_t ContextMachineCostModel::transfer_ns(ContextTransferDirection dire
     return std::max(operation_limited, bandwidth_limited);
 }
 
-std::uint64_t ContextMachineCostModel::transfer_batches_ns(
-    std::span<const TransferBatchWork> batches) const noexcept {
-    constexpr std::size_t kPhaseCount =
-        static_cast<std::size_t>(MaterializationCopyPhase::Candidate) + 1U;
-    constexpr std::size_t kDirectionCount = 3;
-    std::array<TransferWork, kPhaseCount * kDirectionCount> coalesced{};
-    for (const TransferBatchWork& batch : batches) {
-        const std::size_t phase     = static_cast<std::size_t>(batch.phase);
-        const std::size_t direction = static_cast<std::size_t>(batch.direction);
-        if (phase >= kPhaseCount || direction >= kDirectionCount) { continue; }
-        TransferWork& work = coalesced[phase * kDirectionCount + direction];
-        work.payload_bytes = saturating_add(work.payload_bytes, batch.work.payload_bytes);
-        const std::uint64_t operations =
-            static_cast<std::uint64_t>(work.copy_operations) + batch.work.copy_operations;
-        work.copy_operations = operations > std::numeric_limits<std::uint32_t>::max()
-                                   ? std::numeric_limits<std::uint32_t>::max()
-                                   : static_cast<std::uint32_t>(operations);
-    }
-    std::uint64_t total = 0;
-    for (std::size_t phase = 0; phase < kPhaseCount; ++phase) {
-        for (std::size_t direction = 0; direction < kDirectionCount; ++direction) {
-            total =
-                saturating_add(total, transfer_ns(static_cast<ContextTransferDirection>(direction),
-                                                  coalesced[phase * kDirectionCount + direction]));
-        }
-    }
-    return total;
-}
-
-std::uint64_t ContextMachineCostModel::prefill_ns(PrefillWork work) const noexcept {
+std::uint64_t ContextCostModel::prefill_ns(PrefillWork work) const noexcept {
     std::uint64_t result = saturating_product(prefill.chunk_ns, work.chunks);
     result = saturating_add(result, q32_product_ns(prefill.token_ns_q32, work.tokens));
     result =
@@ -425,9 +396,9 @@ std::string context_cost_hardware_class(std::string_view gpu_name, int major, in
     return slug + "-sm" + std::to_string(major) + std::to_string(minor);
 }
 
-ContextMachineCostModel generic_context_machine_cost_model() {
-    return ContextMachineCostModel{.transfer = generic_context_transfer_cost(),
-                                   .prefill  = generic_context_prefill_cost()};
+ContextCostModel generic_context_cost_model() {
+    return ContextCostModel{.transfer = generic_context_transfer_cost(),
+                            .prefill  = generic_context_prefill_cost()};
 }
 
 std::vector<ContextCostMachinePreset> parse_context_cost_presets(std::string_view json,
@@ -498,16 +469,15 @@ std::vector<ContextCostMachinePreset> parse_context_cost_presets(std::string_vie
     return result;
 }
 
-ResolvedContextMachineCost
-resolve_context_machine_cost(const ContextCostIdentity& identity,
-                             const std::filesystem::path& external_preset_path) {
+ResolvedContextCost resolve_context_cost(const ContextCostIdentity& identity,
+                                         const std::filesystem::path& external_preset_path) {
     if (identity.hardware_class.empty() || identity.model_id.empty() ||
         identity.weights_id.empty()) {
         throw std::invalid_argument("context-cost identity contains an empty component");
     }
 
-    ContextMachineCostModel model{.transfer = generic_context_transfer_cost(),
-                                  .prefill  = generic_context_prefill_cost()};
+    ContextCostModel model{.transfer = generic_context_transfer_cost(),
+                           .prefill  = generic_context_prefill_cost()};
     ContextCostPresetSource transfer_source = ContextCostPresetSource::GenericDefault;
     ContextCostPresetSource prefill_source  = ContextCostPresetSource::GenericDefault;
 
@@ -542,7 +512,7 @@ resolve_context_machine_cost(const ContextCostIdentity& identity,
         }
     }
 
-    return ResolvedContextMachineCost{
+    return ResolvedContextCost{
         .model = model,
         .summary =
             {
